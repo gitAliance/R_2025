@@ -1,0 +1,377 @@
+---
+title: "Trabalho – Análise do Transporte Metro RJ"
+subtitle: "Integração de bases: passageiros, população e massa salarial por bairro"
+author: "Gabriel Aliança"
+date: "2025-10-04"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: "hide"
+    df_print: paged
+---
+
+
+# Como reproduzir
+
+1. **Versão do R**: 4.3+  
+2. **Render**: `rmarkdown::render("Analise Transporte.Rmd")` *(ou knit no RStudio)*  
+3. **Ambiente**: veja `sessionInfo()` no fim do documento.  
+4. *(Opcional)* Congele versões com `renv::init()` e `renv::snapshot()`.
+
+```{r setup_global, message=FALSE, warning=FALSE}
+# Ajustes globais (não altera sua análise)
+knitr::opts_chunk$set(fig.width = 6, fig.height = 4, dpi = 150, echo = TRUE)
+set.seed(123)
+```
+
+# Bases, origem e validação
+
+| Nome | Arquivo local | Origem oficial (link) | Data de acesso |
+|---|---|---|---|---|
+| **Censo** | `censo.xlsx` | _https://www.data.rio/apps/0486a2d8fdb241d68395c24e662c48bb/explore_ | 2025-10-04 |
+| **Estações** | `estacoes.xlsx` | _https://www.data.rio/documents/7f3d332baf2f499abc6a0742fce56bec/about_ | 2025-10-04 |
+| **Massa salarial** | `massa_salarial.xlsx` | _https://www.data.rio/documents/f6bb333c4a9b4327bec7225c450e41ee/about_ | 2025-10-04 |
+| **Shapefile estações** | `estacoes_metro/Estações_Metrô.shp` | _https://www.data.rio/datasets/7a0b22723c5a458faaae79f046163504_19/explore_ | 2025-10-04 |
+| **Shapefile trajetos** | `trajetos_metro/Trajetos_Metrô.shp` | _https://www.data.rio/datasets/df17c658dc9c4c3b82b964822f60b98f_18/explore_ | 2025-10-04 |
+
+**Validação (resuma aqui):** Foram coletados bases de dados disponibilizados pelo DataRio com o objetivo de ter um panorâma sobre a distribuição do fluxo de passageiros nas linhas de metrô no municipio do Rio de Janeiro.
+
+# Alterações Prévias e Agrupando os dados
+
+```{r setup, message=FALSE, warning=FALSE}
+# Definir o mirror do CRAN (Brasil ou outro confiável)
+options(repos = c(CRAN = "https://cran.r-project.org"))
+
+knitr::opts_knit$set(root.dir = dirname(rstudioapi::getActiveDocumentContext()$path))
+knitr::opts_chunk$set(echo = TRUE)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+library(readr)
+library(readxl)
+library(janitor)
+library(dplyr)
+
+censo <- read_excel("censo.xlsx")
+estacoes <- read_excel("estacoes.xlsx")
+massa <- read_excel("massa_salarial.xlsx")
+
+```
+
+As três bases utilizadas — **Censo**, **Estações** e **Massa Salarial** — possuem informações complementares
+sobre os bairros do Rio de Janeiro. Cada uma apresenta uma dimensão específica:
+
+- **Censo (censo.xlsx):** fornece dados populacionais e domiciliares por bairro;
+- **Estações (estacoes.xlsx):** contém o número de passageiros embarcados em cada estação de metrô, com o respectivo bairro;
+- **Massa Salarial (massa_salarial.xlsx):** traz a soma da remuneração paga a trabalhadores formais por bairro.
+
+Para realizar as análises, foi necessário **integrar essas três tabelas em uma única base consolidada**.
+O campo comum entre elas é o **nome do bairro**, que funciona como **chave de junção**.
+
+Desse modo, o dataframe final nosso ficou com as seguintes colunas de cada tabela:
+
+| Nome | Origem | 
+|---|---|
+| **Estacao** | `estacoes.xlsx` |
+| **Bairro** | `estacoes.xlsx` |
+| **Linha** | `estacoes.xlsx` |
+| **Passageiros_2022	** | `estacoes.xlsx` |
+| **Populacao_2022** | `censo.xlsx` |
+| **Domicilios_2022** | `censo.xlsx` |
+| **AP** | `massa_salarial.xlsx` |
+| **RP** | `massa_salarial.xlsx` |
+| **GR** | `massa_salarial.xlsx` |
+| **Massa_salarial_2021** | `massa_salarial.xlsx` |
+
+
+```{r carregar_bases, message=FALSE, warning=FALSE}
+names(estacoes) <- janitor::make_clean_names(names(estacoes))
+df <- estacoes[, c("estacao", "bairro", "linha", "x2022")]
+df <- df %>%
+  inner_join(
+    censo %>% select(bairro = nome, Total_de_pessoas_2022, Total_de_domicilios_2022),
+    by = "bairro"
+  )
+df <- df %>%
+  inner_join(
+    massa %>% select(bairro = Bairros, AP, RP, Grupo, `2021`),
+    by = "bairro"
+  )
+colnames(df) <- c(
+  "Estacao", "Bairro", "Linha", "Passageiros_2022",
+  "Populacao_2022", "Domicilios_2022",
+  "AP", "RP", "GR", "Massa_salarial_2021"
+)
+df$Passageiros_2022 <- df$Passageiros_2022 * 1000
+
+```
+
+```{r cabecalho_df, message=FALSE, warning=FALSE}
+library(gt)
+df %>% 
+  head(5) %>% 
+  gt()
+```
+
+# Análise dos dados
+## Visualização inicial
+
+A etapa de análise teve como ponto de partida a compreensão do **funcionamento e da distribuição das linhas do metrô do Rio de Janeiro**, observando como a presença e o fluxo de passageiros nas estações se relacionam com características socioeconômicas dos bairros.
+
+A ideia central foi **avaliar se fatores demográficos e econômicos ajudam a explicar a variação no número de passageiros**.  
+Para isso, três dimensões principais foram consideradas:
+
+1. **População do bairro** — bairros mais populosos tendem a gerar maior demanda por transporte público, o que pode refletir diretamente no número de embarques registrados nas estações próximas.  
+2. **Massa salarial do bairro** — representa o volume de renda formal gerada. A hipótese é que áreas com maior massa salarial concentram atividades econômicas e empregos, atraindo mais deslocamentos diários.  
+3. **Número de passageiros por estação** — variável operacional do sistema metroviário, utilizada como indicador do fluxo de pessoas.
+
+---
+
+A análise foi conduzida buscando **correlações entre essas variáveis**, especialmente:
+
+- A relação entre **população** e **passageiros embarcados**, para verificar se a densidade demográfica é o principal fator determinante do fluxo;
+- A relação entre **massa salarial** e **passageiros embarcados**, para investigar se a concentração de renda e de atividades econômicas nos bairros influencia o uso do metrô.
+
+Essas correlações foram representadas visualmente em **gráficos de dispersão** e, quando necessário, acompanhadas de **linhas de tendência linear (modelo de regressão)** para facilitar a leitura das relações entre as variáveis.
+
+---
+
+```{r 2.1., echo=FALSE}
+library(tibble)
+library(knitr)
+
+tibble(
+  Variável = c("Passageiros_2022", "Populacao_2022", "Massa_salarial_2021"),
+  Média = sapply(df[c("Passageiros_2022", "Populacao_2022", "Massa_salarial_2021")], mean, na.rm = TRUE),
+  Mediana = sapply(df[c("Passageiros_2022", "Populacao_2022", "Massa_salarial_2021")], median, na.rm = TRUE),
+  Mínimo = sapply(df[c("Passageiros_2022", "Populacao_2022", "Massa_salarial_2021")], min, na.rm = TRUE),
+  Máximo = sapply(df[c("Passageiros_2022", "Populacao_2022", "Massa_salarial_2021")], max, na.rm = TRUE)
+) %>%
+  kable(digits = 0, caption = "Resumo Estatístico das Variáveis Selecionadas")
+```
+
+```{r teste, include=FALSE}
+#install.packages(c("sf", "ggplot2", "dplyr", "plotly", "geobr"))
+library(geobr)
+library(ggplot2)
+library(sf)
+library(plotly)
+library(dplyr)
+
+# 1. Carregar todos os bairros do Brasil
+todos_bairros <- read_neighborhood(year = 2022)
+
+# 2. Filtrar apenas os do município do Rio de Janeiro (código: 3304557)
+rj_map <- todos_bairros %>% filter(code_muni == 3304557)
+
+# 3. Bairros que possuem estação
+bairros_com_estacao <- unique(df$Bairro)
+
+# 4. Filtrar o mapa para esses bairros
+mapa_filtrado <- rj_map %>%
+  filter(name_neighborhood %in% bairros_com_estacao)
+
+# 5. Carregar shapefile das estações (pontos)
+estacoes_metro <- st_read("estacoes_metro/Estações_Metrô.shp")
+
+# 6. Carregar shapefile dos trajetos do metrô (linhas)
+trajetos_metro <- st_read("trajetos_metro/Trajetos_Metrô.shp")
+
+# 7. Criar tooltips
+mapa_filtrado$tooltip <- mapa_filtrado$name_neighborhood
+estacoes_metro$tooltip <- paste("Estação:", estacoes_metro$nome)
+
+```
+
+```{r mapa_metro, echo=FALSE, warning=FALSE}
+g <- ggplot() +
+  geom_sf(data = rj_map, fill = "gray85", color = "white") +
+  geom_sf(data = mapa_filtrado, aes(text = tooltip), fill = "steelblue", color = "white") +
+  geom_sf(data = trajetos_metro, color = "red", size = 1) +
+  geom_sf(data = estacoes_metro, aes(text = tooltip), color = "green", size = 2) +
+  labs(
+    title = "Mapa do Metrô do Rio de Janeiro",
+    subtitle = "Bairros com trajetos e estações (Data.Rio)"
+  ) +
+  theme_minimal()
+
+ggplotly(g, tooltip = "text")
+```
+
+## Correlação entre Passageiros e População (2022)
+
+```{r grafico_passageiros_populacao, message=FALSE, warning=FALSE, echo=FALSE}
+library(scales)  # para label_number()
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# Cálculo da correlação
+correlacao <- round(cor(df$Populacao_2022, df$Passageiros_2022, use = "complete.obs"), 2)
+
+# Gráfico com anotação
+g <- ggplot(df, aes(x = Populacao_2022, y = Passageiros_2022)) +
+  geom_point(
+    aes(text = paste0(
+      "Estação: ", Estacao, "<br>",
+      "Bairro: ", Bairro, "<br>",
+      "População: ", comma(Populacao_2022), "<br>",
+      "Passageiros: ", comma(Passageiros_2022))
+    ),
+    color = "steelblue",
+    size = 2
+  ) +
+  geom_smooth(method = "lm", se = FALSE, color = "darkred") +
+  scale_y_continuous(labels = label_number(scale = 1/1000, suffix = " mil")) +
+  scale_x_continuous(labels = label_comma(), limits = c(0, max(df$Populacao_2022, na.rm = TRUE))) +
+  labs(
+    title = "População vs. Passageiros por Estação (2022)",
+    x = "População do Bairro",
+    y = "Passageiros na Estação (em mil)"
+  ) +
+  # Adiciona anotação no canto do gráfico
+  annotate(
+    "text",
+    x = max(df$Populacao_2022, na.rm = TRUE) * 0.95,
+    y = max(df$Passageiros_2022, na.rm = TRUE) * 0.95,
+    label = paste("Correlação:", correlacao),
+    hjust = 1,
+    size = 4,
+    color = "black"
+  ) +
+  theme_minimal()
+
+# Gráfico interativo
+ggplotly(g, tooltip = "text")
+```
+### Correlação entre População do Bairro e Passageiros por Estação (2022)
+
+O gráfico acima apresenta a relação entre a **população total dos bairros** e a **quantidade de passageiros embarcados nas estações de metrô** localizadas nesses mesmos bairros, considerando o ano de 2022.  
+
+Visualmente, observa-se uma **tendência positiva, porém fraca**, representada pela linha de regressão levemente ascendente.  
+O coeficiente de correlação calculado foi de aproximadamente **0,22**, o que indica uma **associação positiva de baixa intensidade** entre as duas variáveis.
+
+Em termos práticos, isso significa que **bairros mais populosos tendem a registrar maior fluxo de passageiros**, mas essa relação **não é linear nem determinante**.  
+Entre os pontos mais distantes na lateral direita do gráfico, destaca-se o bairro da **Tijuca**, que combina **alta população** com **grande volume de embarques**.  
+Essa região concentra várias estações importantes (como Saens Peña, Uruguai e Afonso Pena), além de conexões com linhas de ônibus, o que ajuda a explicar seu valor atípico.
+
+Outros fatores também contribuem para a dispersão dos pontos e a baixa correlação geral, como:
+
+- A **localização geográfica** das estações e sua função de conexão interbairros;  
+- A **presença de polos comerciais e de serviços** que atraem pessoas de outras regiões;  
+- Diferenças **socioeconômicas** e de acesso a outros meios de transporte.
+
+Em síntese, a análise mostra que, embora a **população influencie o uso do metrô**, o **fluxo de passageiros depende fortemente da função urbana do bairro** — no caso da Tijuca, um centro residencial e comercial de alta densidade e boa conectividade.
+
+
+## Correlação entre Passageiros e Massa Salarial (2022)
+```{r grafico_passageiros_massa, message=FALSE, warning=FALSE, echo=FALSE}
+library(scales)  # para label_number()
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# Cálculo da correlação
+correlacao <- round(cor(df$Massa_salarial_2021, df$Passageiros_2022, use = "complete.obs"), 2)
+
+# Gráfico com anotação
+g <- ggplot(df, aes(x = Massa_salarial_2021, y = Passageiros_2022)) +
+  geom_point(
+    aes(text = paste0(
+      "Estação: ", Estacao, "<br>",
+      "Bairro: ", Bairro, "<br>",
+      "População: ", comma(Massa_salarial_2021), "<br>",
+      "Passageiros: ", comma(Passageiros_2022))
+    ),
+    color = "steelblue",
+    size = 2
+  ) +
+  geom_smooth(method = "lm", se = FALSE, color = "darkred") +
+  scale_y_continuous(labels = label_number(scale = 1/1000, suffix = " mil")) +
+  scale_x_continuous(labels = label_comma(), limits = c(0, max(df$Massa_salarial_2021, na.rm = TRUE))) +
+  labs(
+    title = "Massa Salarial vs. Passageiros por Estação (2022)",
+    x = "Massa Salarial do Bairro",
+    y = "Passageiros na Estação (em mil)"
+  ) +
+  # Adiciona anotação no canto do gráfico
+  annotate(
+    "text",
+    x = max(df$Massa_salarial_2021, na.rm = TRUE) * 0.95,
+    y = max(df$Passageiros_2022, na.rm = TRUE) * 0.95,
+    label = paste("Correlação:", correlacao),
+    hjust = 1,
+    size = 4,
+    color = "black"
+  ) +
+  theme_minimal()
+
+# Gráfico interativo
+ggplotly(g, tooltip = "text")
+```
+
+### Correlação entre Massa Salarial do Bairro e Passageiros por Estação (2022)
+
+O gráfico acima apresenta a relação entre a **massa salarial total dos bairros** — isto é, a soma dos salários pagos a trabalhadores formais — e a **quantidade de passageiros embarcados nas estações de metrô** localizadas nesses mesmos bairros, no ano de 2022.  
+
+Diferentemente da análise anterior, observa-se aqui uma **correlação positiva mais forte**, com coeficiente de aproximadamente **0,51**.  
+A linha de tendência possui inclinação acentuada, indicando que **bairros com maior massa salarial tendem a registrar volumes significativamente maiores de embarques**.
+
+Essa relação sugere que a **atividade econômica e o poder aquisitivo local influenciam diretamente o fluxo de passageiros**.  
+Bairros que concentram empresas, comércio e serviços — portanto, maior massa salarial — atraem trabalhadores e consumidores de outras regiões, gerando **movimentos pendulares diários** que elevam a demanda por transporte público.
+
+---
+
+Entre os pontos mais afastados na lateral direita do gráfico estão bairros de **alta renda e concentração de empregos**, como o **Centro**, que funcionam como **polo econômico e de convergência de transporte urbano**.  
+Essas áreas não apenas abrigam residentes com rendimentos elevados, mas também recebem um grande contingente de trabalhadores de outras zonas da cidade, o que explica seu destaque no gráfico.
+
+Em contrapartida, bairros com massa salarial mais baixa mantêm fluxos mais modestos, ainda que possam ter populações expressivas — reforçando a ideia de que **a dinâmica econômica local tem maior peso que o tamanho populacional** na determinação do volume de passageiros.
+
+---
+
+Em síntese, os resultados indicam que **a massa salarial apresenta correlação mais robusta com o uso do metrô do que a população**, evidenciando que o **transporte metroviário do Rio de Janeiro está fortemente associado à concentração de atividades econômicas** e aos **centros de emprego da cidade**.
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+# Glossário de variáveis
+
+A tabela consolidada utilizada nesta análise foi construída a partir da integração das três bases originais
+(`estacoes.xlsx`, `censo.xlsx` e `massa_salarial.xlsx`), resultando em dez variáveis principais:
+
+| Variável | Descrição |
+|-----------|-----------|
+| **Estacao** | Nome da estação de metrô considerada na análise. Cada linha do conjunto de dados representa uma estação localizada em determinado bairro. |
+| **Bairro** | Nome do bairro onde a estação está localizada. Utilizado como chave de integração entre as diferentes bases. |
+| **Linha** | Linha do metrô à qual a estação pertence (ex.: Linha 1 – Laranja, Linha 2 – Verde). |
+| **Passageiros_2022** | Total de passageiros embarcados na estação ao longo de 2022 (em milhares). Representa o fluxo operacional do metrô. |
+| **Populacao_2022** | População residente no bairro em 2022, conforme dados censitários. Utilizada para avaliar a relação entre densidade populacional e volume de passageiros. |
+| **Domicilios_2022** | Número de domicílios particulares permanentes no bairro em 2022. Serve como indicador complementar de ocupação residencial. |
+| **AP** | Código de **Área de Planejamento (AP)** do município do Rio de Janeiro, utilizado pela Prefeitura para fins de planejamento urbano. |
+| **RP** | Código da **Região de Planejamento (RP)**, subdivisão territorial que agrupa bairros com características semelhantes. |
+| **GR** | Código de **Grupo Regional**, relacionado a agrupamentos administrativos de bairros para análise socioeconômica. |
+| **Massa_salarial_2021** | Soma dos salários pagos a trabalhadores formais no bairro durante o ano de 2021 (em reais). Indicador de atividade econômica e renda. |
+
+---
+
+Essas variáveis foram harmonizadas por meio da chave **“Bairro”**, após limpeza e padronização dos nomes, possibilitando a análise integrada entre
+**infraestrutura de transporte**, **população residente** e **dinâmica econômica** dos bairros do Rio de Janeiro.
+
+# Referências e Ferramentas de IA
+
+- DataRio.  
+- Base dos Dados / MTE-CAGED.  
+- MetrôRio / Embarques por estação.  
+- Aulas de R
+- Aulas de Estatística Descritiva.
+- ChatGPT (GPT‑5 Thinking).  
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```
